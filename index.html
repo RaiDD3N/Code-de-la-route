@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code à deux</title>
+<style>
+:root{--bg:#f5f6fa;--fg:#1c1e26;--card:#fff;--ac:#4f46e5;--ok:#16a34a;--ko:#dc2626;--mut:#6b7280}
+@media(prefers-color-scheme:dark){:root{--bg:#14151b;--fg:#f1f2f6;--card:#22242e;--mut:#9ca3af}}
+*{box-sizing:border-box}
+body{margin:0 auto;font:16px system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:16px;max-width:520px}
+h1{font-size:24px;text-align:center}
+section{background:var(--card);border-radius:16px;padding:18px;margin-top:12px}
+label{display:block;margin-top:14px;font-weight:600;font-size:14px}
+input,button{font:inherit;width:100%;padding:14px;border-radius:12px;border:2px solid #8883;margin-top:8px}
+input{background:transparent;color:inherit}
+button{background:var(--ac);color:#fff;border:0;font-weight:600;cursor:pointer}
+button.o{background:var(--card);color:var(--fg);border:2px solid #8885;text-align:left}
+button.sel{border-color:var(--ac);background:var(--ac);color:#fff}
+.chips{display:flex;gap:8px}
+.chip{flex:1;width:auto;padding:12px 4px;background:transparent;color:inherit;border:2px solid #8885;text-align:center;font-size:15px}
+.chip.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.big{font-size:40px;letter-spacing:6px;text-align:center;font-weight:800}
+.mut{color:var(--mut);font-size:14px;text-align:center}
+.bar{display:flex;justify-content:space-between;color:var(--mut);font-size:14px}
+.rk{margin:10px 0;padding:0;list-style:none}
+.rk li{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #8883}
+.rv{border-left:5px solid;border-radius:8px;padding:8px 12px;margin-top:10px;background:#8881}
+.rv.g{border-color:var(--ok)}.rv.b{border-color:var(--ko)}
+.rv p{margin:6px 0}
+.why{color:var(--mut)}
+hr{border:0;border-top:1px solid #8884;margin:20px 0 6px}
+</style>
+</head>
+<body>
+<h1>🚗 Code à deux</h1>
+
+<section id="home">
+  <label>Ton pseudo</label>
+  <input id="name" placeholder="Ex : Marcel" maxlength="14">
+  <label>Nombre de joueurs</label>
+  <div class="chips" id="cp"></div>
+  <label>Nombre de questions (série blanche)</label>
+  <div class="chips" id="cn"></div>
+  <button onclick="hostGame()" style="margin-top:18px">Créer la partie</button>
+  <hr>
+  <label>Ou rejoindre une partie</label>
+  <input id="join" placeholder="Code à 4 caractères" maxlength="4" autocapitalize="characters">
+  <button class="o" onclick="joinGame()">Rejoindre</button>
+  <p class="mut" id="err"></p>
+</section>
+
+<section id="lobby" hidden>
+  <p class="mut">Code à donner aux autres joueurs</p>
+  <div class="big" id="code"></div>
+  <p class="mut" id="lmsg"></p>
+  <button id="go" onclick="startGame()" hidden>Lancer la partie</button>
+</section>
+
+<section id="game" hidden>
+  <div class="bar"><span id="num"></span><span id="tm"></span></div>
+  <h2 id="q"></h2>
+  <div id="opts"></div>
+  <p id="wait" class="mut"></p>
+</section>
+
+<section id="end" hidden>
+  <h2 id="res" style="text-align:center"></h2>
+  <p id="verdict" class="mut"></p>
+  <ul class="rk" id="rank"></ul>
+  <label>Correction</label>
+  <div class="chips">
+    <button class="chip on" id="f0" onclick="renderRev(0)">Tout voir</button>
+    <button class="chip" id="f1" onclick="renderRev(1)">Mes erreurs</button>
+  </div>
+  <div id="rev"></div>
+  <button onclick="location.reload()" style="margin-top:18px">Rejouer</button>
+</section>
+
+<script src="questions.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $=id=>document.getElementById(id),
+  shuf=a=>a.map(x=>[Math.random(),x]).sort((p,q)=>p[0]-q[0]).map(p=>p[1]),
+  show=id=>document.querySelectorAll('section').forEach(s=>s.hidden=s.id!==id),
+  esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML},
+  nm=()=>$('name').value.trim().slice(0,14)||'Joueur',
+  err=m=>$('err').textContent=m,
+  mk=(id,name)=>({id,name,sc:0,ans:[]}),
+  TMAX=30;
+let peer,conn,me='p0',P=[],C={},st={i:-1},cfg={max:1,n:10},locked,t0,tmr,curN,nid=0,ended=false,M;
+
+function chips(id,opts,key){
+  $(id).innerHTML='';
+  opts.forEach(([l,v])=>{
+    const b=document.createElement('button');
+    b.className='chip'+(cfg[key]===v?' on':'');b.textContent=l;
+    b.onclick=()=>{cfg[key]=v;chips(id,opts,key)};
+    $(id).appendChild(b);
+  });
+}
+chips('cp',[['Solo',1],['2',2],['3',3],['4',4]],'max');
+chips('cn',[['5',5],['10',10],['20',20],['Toutes ('+Q.length+')',Q.length]],'n');
+
+const bc=m=>Object.values(C).forEach(c=>c.open&&c.send(m));
+
+/* ---------- Hôte ---------- */
+function hostGame(){
+  P=[mk('p0',nm())];me='p0';
+  if(cfg.max===1)return startGame();
+  const c=Math.random().toString(36).slice(2,6).toUpperCase();
+  peer=new Peer('codeadeux-'+c);
+  peer.on('open',()=>{$('code').textContent=c;lobby();show('lobby')});
+  peer.on('error',e=>err('Connexion impossible, réessaie ('+e.type+').'));
+  peer.on('connection',cn=>{
+    cn.on('data',m=>hostData(cn,m));
+    cn.on('close',()=>{
+      const p=P.find(x=>x.id===cn.pid);if(!p)return;
+      if(st.i<0){P=P.filter(x=>x!==p);delete C[p.id];lobby();bc({t:'l',names:P.map(x=>x.name)})}
+      else{p.gone=true;chk()}
+    });
+  });
+}
+function lobby(){
+  $('lmsg').textContent='Joueurs ('+P.length+'/'+cfg.max+') : '+P.map(p=>p.name).join(', ');
+  $('go').hidden=P.length<2;
+}
+function hostData(cn,m){
+  if(m.t==='hi'){
+    if(P.length>=cfg.max||st.i>=0){cn.send({t:'full'});setTimeout(()=>cn.close(),400);return}
+    cn.pid='p'+(++nid);C[cn.pid]=cn;P.push(mk(cn.pid,String(m.n).slice(0,14)));
+    cn.send({t:'id',id:cn.pid});lobby();bc({t:'l',names:P.map(x=>x.name)});
+  }else if(m.t==='a')answer(cn.pid,m.i,m.ms,m.n);
+}
+function startGame(){
+  st={ids:shuf(Q.map((_,i)=>i)).slice(0,Math.min(cfg.n,Q.length)),i:-1,rv:[],got:{}};
+  next();
+}
+function next(){
+  clearTimeout(st.to);st.i++;
+  if(st.i>=st.ids.length)return finish();
+  const q=Q[st.ids[st.i]],ord=shuf(q[1].map((_,k)=>k));
+  st.cur={q:q[0],o:ord.map(k=>q[1][k]),c:ord.indexOf(q[2]),e:q[3]};
+  st.rv.push(st.cur);st.got={};
+  P.forEach(p=>p.ans[st.i]=-1);
+  const m={t:'q',n:st.i+1,N:st.ids.length,q:st.cur.q,o:st.cur.o};
+  bc(m);showQ(m);
+  st.to=setTimeout(next,(TMAX+1)*1000);
+}
+function answer(id,i,ms,n){
+  const p=P.find(x=>x.id===id);
+  if(!p||n!==st.i+1||st.got[id])return;
+  st.got[id]=1;p.ans[st.i]=i;
+  if(i===st.cur.c)p.sc+=500+Math.round(500*Math.max(0,1-ms/(TMAX*1000)));
+  chk();
+}
+function chk(){
+  if(P.every(p=>p.gone||st.got[p.id])){clearTimeout(st.to);st.to=setTimeout(next,700)}
+}
+function finish(){
+  const m={t:'e',rv:st.rv,P:P.map(({id,name,sc,ans})=>({id,name,sc,ans}))};
+  bc(m);showEnd(m);
+}
+
+/* ---------- Invité ---------- */
+function joinGame(){
+  const c=$('join').value.trim().toUpperCase();
+  if(c.length<4)return err('Entre le code à 4 caractères.');
+  err('Connexion…');
+  peer=new Peer();
+  peer.on('open',()=>{
+    conn=peer.connect('codeadeux-'+c,{reliable:true});
+    conn.on('open',()=>{
+      conn.send({t:'hi',n:nm()});$('code').textContent=c;
+      $('lmsg').textContent='Connecté ! En attente des autres joueurs…';
+      $('go').hidden=true;show('lobby');
+    });
+    conn.on('data',guestData);
+    conn.on('close',()=>{if(!ended){alert('Connexion perdue avec l\'hôte.');location.reload()}});
+  });
+  peer.on('error',()=>err('Code introuvable ou connexion impossible.'));
+}
+function guestData(m){
+  if(m.t==='id')me=m.id;
+  else if(m.t==='l')$('lmsg').textContent='Joueurs : '+m.names.join(', ')+' — l\'hôte lance la partie.';
+  else if(m.t==='full'){alert('Partie pleine ou déjà commencée.');location.reload()}
+  else if(m.t==='q')showQ(m);
+  else if(m.t==='e'){ended=true;showEnd(m)}
+}
+
+/* ---------- Question (série blanche : pas de correction pendant la série) ---------- */
+function showQ(m){
+  curN=m.n;locked=false;show('game');
+  $('num').textContent='Question '+m.n+'/'+m.N;
+  $('q').textContent=m.q;$('wait').textContent='';$('opts').innerHTML='';
+  m.o.forEach((t,i)=>{
+    const b=document.createElement('button');b.className='o';b.textContent='ABCD'[i]+'. '+t;
+    b.onclick=()=>pick(i,b);$('opts').appendChild(b);
+  });
+  t0=Date.now();clearInterval(tmr);
+  const tick=()=>{
+    const r=Math.max(0,TMAX-Math.floor((Date.now()-t0)/1000));
+    $('tm').textContent='⏱ '+r+' s';
+    if(r<=0){clearInterval(tmr);if(!locked){locked=true;lock();$('wait').textContent='Temps écoulé…'}}
+  };
+  tick();tmr=setInterval(tick,250);
+}
+const lock=()=>document.querySelectorAll('#opts button').forEach(x=>x.disabled=true);
+function pick(i,b){
+  if(locked)return;locked=true;lock();b.classList.add('sel');
+  const ms=Date.now()-t0;
+  $('wait').textContent=cfg.max>1||conn?'Réponse enregistrée, on attend les autres…':'';
+  if(conn)conn.send({t:'a',i,ms,n:curN});else answer('p0',i,ms,curN);
+}
+
+/* ---------- Fin de série + correction ---------- */
+const mine=()=>M.P.find(p=>p.id===me)||M.P[0];
+function showEnd(m){
+  M=m;clearInterval(tmr);show('end');
+  const N=m.rv.length,good=p=>m.rv.filter((r,i)=>p.ans[i]===r.c).length,ok=good(mine());
+  $('res').textContent=ok+' / '+N+' bonnes réponses';
+  $('verdict').textContent=ok/N>=.875
+    ?'🎉 Au niveau de l\'examen (seuil : 35 bonnes réponses sur 40, soit 87,5 %).'
+    :'Pas encore au niveau : l\'examen demande 35/40 (87,5 %). Regarde la correction ci-dessous 👇';
+  $('rank').innerHTML=m.P.length>1?[...m.P].sort((a,b)=>b.sc-a.sc).map((p,k)=>
+    '<li><span>'+(k+1)+'. '+esc(p.name)+(p.id===me?' (toi)':'')+'</span><span>'+good(p)+'/'+N+' · '+p.sc+' pts</span></li>').join(''):'';
+  renderRev(0);
+}
+function renderRev(only){
+  $('f0').classList.toggle('on',!only);$('f1').classList.toggle('on',!!only);
+  const box=$('rev');box.innerHTML='';
+  M.rv.forEach((r,i)=>{
+    const a=mine().ans[i],g=a===r.c;if(only&&g)return;
+    const d=document.createElement('div');d.className='rv '+(g?'g':'b');
+    d.innerHTML='<b>'+(i+1)+'. '+esc(r.q)+'</b>'+
+      (g?'<p>✅ '+esc(r.o[r.c])+'</p>'
+        :'<p>❌ Ta réponse : '+(a<0?'aucune (temps écoulé)':esc(r.o[a]))+'</p><p>✅ Bonne réponse : '+esc(r.o[r.c])+'</p>')+
+      '<p class="why">💡 '+(g?'':'Pourquoi : ')+esc(r.e)+'</p>';
+    box.appendChild(d);
+  });
+  if(!box.children.length)box.innerHTML='<p class="mut">Aucune erreur, bravo ! 🎉</p>';
+}
+</script>
+</body>
+</html>
